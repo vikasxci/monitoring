@@ -44,9 +44,9 @@ router.post("/notifications", async (req, res) => {
     // The app's `key` (Android's sbn.key) is reused for the same notification
     // slot, so two different messages from the same app — often with the same
     // title/appLabel — would collide and overwrite each other. Derive the dedup
-    // key from the message content + postedAt so each distinct notification is
-    // stored separately, while a true re-send of the identical notification
-    // (same content + time) still de-duplicates.
+    // key from the message content + the app's slot key + postedAt so each
+    // distinct notification is stored separately, while a true re-send of the
+    // identical notification (same content + slot + time) still de-duplicates.
     const dedupeKey = crypto
       .createHash("sha1")
       .update(
@@ -55,6 +55,7 @@ router.post("/notifications", async (req, res) => {
           i.appLabel || "",
           i.title || "",
           i.text || "",
+          i.key || "",
           i.postedAt || "",
         ].join("\u0000")
       )
@@ -67,9 +68,29 @@ router.post("/notifications", async (req, res) => {
       },
     };
   });
-  if (ops.length)
-    await NotificationLog.bulkWrite(ops, { ordered: false }).catch(() => {});
-  res.json({ upserted: ops.length });
+  if (!ops.length) return res.json({ received: 0, stored: 0 });
+
+  try {
+    // ordered:false so one duplicate in a batch never blocks the rest.
+    const r = await NotificationLog.bulkWrite(ops, { ordered: false });
+    const stored = (r.upsertedCount || 0) + (r.modifiedCount || 0);
+    return res.json({ received: ops.length, stored });
+  } catch (err) {
+    // A duplicate-key (E11000) within a batch is expected and harmless — the
+    // other writes still commit. Surface anything else instead of swallowing
+    // it, so a real failure can't silently produce "nothing lands in the DB".
+    const res0 = err.result?.result || {};
+    const stored = (res0.nUpserted || 0) + (res0.nModified || 0);
+    const nonDup = (err.writeErrors || []).filter((e) => e.code !== 11000);
+    if (nonDup.length) {
+      console.error(
+        "[ingest] notifications bulkWrite error:",
+        nonDup[0].errmsg || err.message
+      );
+      return res.status(500).json({ error: "ingest failed", stored });
+    }
+    return res.json({ received: ops.length, stored });
+  }
 });
 
 // POST /api/ingest/contacts  { items: [{contactId,name,phones,emails}] }
