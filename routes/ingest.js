@@ -15,10 +15,40 @@ router.use(requireDevice);
 router.post("/locations", async (req, res) => {
   const { items = [] } = req.body || {};
   const deviceId = req.device.deviceId;
-  if (!items.length) return res.json({ inserted: 0 });
+  const model = req.device.model || "?";
+
+  console.log(
+    `[ingest] locations <- device=${deviceId} (${model}) items=${items.length}`
+  );
+
+  if (!items.length) {
+    // The phone reached us and authed fine, but sent an empty batch — i.e. it
+    // never got a location fix to send. That's a device-side GPS problem, and
+    // logging it here is how we tell it apart from "nothing arrived at all".
+    console.warn(`[ingest] locations: EMPTY batch from device=${deviceId}`);
+    return res.json({ inserted: 0 });
+  }
+
   const docs = items.map((i) => ({ ...i, deviceId }));
-  const r = await Location.insertMany(docs, { ordered: false }).catch(() => []);
-  res.json({ inserted: r.length });
+  try {
+    // ordered:false so one bad row never blocks the rest of the batch.
+    const r = await Location.insertMany(docs, { ordered: false, rawResult: true });
+    const inserted = r.insertedCount ?? (r.insertedIds ? Object.keys(r.insertedIds).length : 0);
+    console.log(`[ingest] locations: stored ${inserted}/${items.length} for device=${deviceId}`);
+    return res.json({ inserted });
+  } catch (err) {
+    // Some rows may still have inserted; surface how many, and WHY the rest
+    // failed, instead of swallowing it and returning a misleading 200.
+    const inserted = err.insertedDocs?.length || err.result?.result?.nInserted || 0;
+    const writeErrors = err.writeErrors || [];
+    const first = writeErrors[0];
+    console.error(
+      `[ingest] locations FAILED for device=${deviceId}: inserted=${inserted}/${items.length}` +
+        (first ? ` firstError="${first.errmsg || first.err?.errmsg || err.message}"` : ` ${err.message}`)
+    );
+    // Non-2xx so the phone's lastError shows "HTTP 500" instead of a silent success.
+    return res.status(500).json({ inserted, error: "location ingest failed" });
+  }
 });
 
 // POST /api/ingest/usage  { day, items: [{packageName,appLabel,totalTimeMs,lastUsedAt,launchCount}] }
