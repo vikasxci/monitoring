@@ -22,13 +22,20 @@ export async function requireDevice(req, res, next) {
   const deviceId = req.headers["x-device-id"];
   const token = req.headers["x-device-token"];
   if (!deviceId || !token) {
+    console.warn(`[auth] device request rejected: missing credentials (path=${req.path})`);
     return res.status(401).json({ error: "missing device credentials" });
   }
   const device = await Device.findOne({ deviceId });
-  if (!device) return res.status(401).json({ error: "unknown device" });
+  if (!device) {
+    console.warn(`[auth] device request rejected: unknown device=${deviceId} (path=${req.path})`);
+    return res.status(401).json({ error: "unknown device" });
+  }
 
   const ok = await bcrypt.compare(token, device.tokenHash);
-  if (!ok) return res.status(401).json({ error: "bad device token" });
+  if (!ok) {
+    console.warn(`[auth] device request rejected: bad token for device=${deviceId} (path=${req.path})`);
+    return res.status(401).json({ error: "bad device token" });
+  }
 
   device.lastSeenAt = new Date();
   if (req.headers["x-battery"]) device.battery = Number(req.headers["x-battery"]);
