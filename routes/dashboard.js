@@ -5,6 +5,7 @@ import Location from "../models/Location.js";
 import AppUsage from "../models/AppUsage.js";
 import NotificationLog from "../models/NotificationLog.js";
 import Contact from "../models/Contact.js";
+import CallLog from "../models/CallLog.js";
 
 const router = Router();
 router.use(requireAdmin);
@@ -25,6 +26,7 @@ router.get("/devices", async (req, res) => {
         locations: await Location.countDocuments({ deviceId: d.deviceId }),
         notifications: await NotificationLog.countDocuments({ deviceId: d.deviceId }),
         contacts: await Contact.countDocuments({ deviceId: d.deviceId }),
+        callLogs: await CallLog.countDocuments({ deviceId: d.deviceId }),
       },
     }))
   );
@@ -34,14 +36,15 @@ router.get("/devices", async (req, res) => {
 router.get("/:deviceId/summary", async (req, res) => {
   const { deviceId } = req.params;
   const day = new Date().toISOString().slice(0, 10);
-  const [device, lastLoc, topApps, recentNotifs, contactsCount] = await Promise.all([
+  const [device, lastLoc, topApps, recentNotifs, contactsCount, recentCalls] = await Promise.all([
     Device.findOne({ deviceId }).lean(),
     Location.findOne({ deviceId }).sort({ recordedAt: -1 }).lean(),
     AppUsage.find({ deviceId, day }).sort({ totalTimeMs: -1 }).limit(8).lean(),
     NotificationLog.find({ deviceId }).sort({ postedAt: -1 }).limit(10).lean(),
     Contact.countDocuments({ deviceId }),
+    CallLog.find({ deviceId }).sort({ timestamp: -1 }).limit(10).lean(),
   ]);
-  res.json({ device, lastLocation: lastLoc, topApps, recentNotifs, contactsCount, day });
+  res.json({ device, lastLocation: lastLoc, topApps, recentNotifs, contactsCount, recentCalls, day });
 });
 
 router.get("/:deviceId/locations", async (req, res) => {
@@ -73,6 +76,15 @@ router.get("/:deviceId/notifications", async (req, res) => {
 router.get("/:deviceId/contacts", async (req, res) => {
   const { deviceId } = req.params;
   const items = await Contact.find({ deviceId }).sort({ name: 1 }).lean();
+  res.json({ items });
+});
+
+router.get("/:deviceId/calllogs", async (req, res) => {
+  const { deviceId } = req.params;
+  const limit = Math.min(Number(req.query.limit) || 500, 5000);
+  const q = { deviceId };
+  if (req.query.type) q.type = req.query.type;
+  const items = await CallLog.find(q).sort({ timestamp: -1 }).limit(limit).lean();
   res.json({ items });
 });
 
